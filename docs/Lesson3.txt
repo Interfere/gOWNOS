@@ -1,0 +1,316 @@
+3. Вывод на экран.
+Итак, теперь у нас есть ядро, которое загружается и запускает бесконечный цикл. Самое время вывести что-нибудь интересное на экран. Вместе с портами ввода-вывода, монитор будет нашим главным союзником в процессе отладки ядра.
+
+3.0. Дополнения к уже написанному коду.
+Прежде, чем мы продолжим, давайте внесем некоторые дополнения в наш уже существующий код. Я их не сам придумал, а подсмотрел у Линуса. Обратиться у опыту человека, который уже написал свою ОС будет как минимум полезно. Изменим функцию kmain(), которую мы реализовали в прошлом уроке.
+
+[code]
+// main.c -- Defines the C-code kernel entry point, calls initialisation routines.
+
+void kmain(int magic, struct multiboot *mboot_ptr)
+{
+	// Check for multiboot magic
+	if(magic != 0x2BADB002)
+	{
+		// error. Bootloader not multiboot-compliant
+		return;
+	}
+	// All our initialisation calls will go in here
+}
+[/code]
+
+Итак, мы изменили тип возвращаемого нашей функцией значения. В принципе это было делать не обязательно, но так, на мой взгляд, правильнее. Этим мы показываем компилятору, что наша функция kmain() не возвращает никакого значения. Возврат из этой функции вообще не должен происходить. 
+
+Кроме этого у нас добавился аргумент magic при вызове функции kmain(). Дело в том, что согласно Multiboot Specification GRUB помещает в регистр EAX специальный идентификатор, который сообщает ядру, что оно было загружено совместимым (multiboot-compliant) загрузчиком. Теперь нам необходимо добавить строчку в файл boot.s, которая протолкнет в стек значение из регистра EAX:
+[code]
+start:
+	push	ebx				; загрузить в стек адрес структуры, полученной от загрузчика
+	push	eax				; загрузить в стек идентификатор совместимого загрузчика
+[/code]
+
+Теперь мы можем переходить к непосредственной теме нашего сегодняшнего урока.
+
+3.1. Теория.
+Ядро загружается в текстовом режиме. Таким образом, нам доступен framebuffer (специальная область памяти), которым управляется отображение символов на экране шириной 80 символов и высотой 25 строк. В этом режиме мы будем работать до тех пор, пока вы не познакомитесь с миром VESA (не рассматриваемом в нашем цикле статей).
+
+Область памяти называемая framebuffer доступна как область обычной оперативной памяти по адресу 0xB8000. Очень важно понимать, что это не обычная оперативная память - это часть памяти контроллера VGA, которая была отображена оборудованием на линейные адреса оперативной памяти. Это важное различие.
+
+Framebuffer - это просто массив 16-битных слов, каждое из которых представляет один символ. Смещение в этом массиве, соответствующее символу в y строке на x позиции:
+[code]
+(y*80 + x)*2
+[/code]
+
+Все символы ASCII (а UTF не доступен в тектовом режиме) длиной 8-бит. Оставшиеся 8 бит используются VGA для определения цвета символа и фона под этим символом (каждый по 4 бита).
+[code]
+ 15         12 11          8 7                        0
+| background  | foreground  |     Character code      |
+|   color     |    color    |                         |
+[/code]
+
+4 бита для кодирования цвета дают нам 15 возможных цветов, которые мы можем использовать:
+0:черный, 1:синий, 2:зеленый, 3:голубой, 4:красный, 5:пурпурный, 6:коричневый, 7:светло-серый, 8:темно-серый, 9:светло-синий, 10:светло-зеленый, 11:светло-голубой, 12:розовый, 13:светло-пурпурный, 14:светло-коричневый, 15 белый.
+
+Контроллер VGA также имеет несколько портов ввода-вывода на которые вы можете послать специальные сигналы. Помимо прочих, у него есть контрольный регистр 0x3D4 и регистр данных 0x3D5. Мы будем использовать их для управления позицией курсора.
+
+3.2. Практика
+3.2.1. Для начала...
+Для начала, нам потребуются несколько часто-используемых глобальных функций. Файлы common.c и common.h содержат функции для записи и чтения значений из портов ввода-вывода, а также определения нескольких типов, которые упростят нам дальнейшую работу. Это также отличное место для размещения определений функций memcpy/memset.
+[code]
+// common.h -- Defines typedefs and some global functions
+
+#ifndef COMMON_H_
+#define COMMON_H_
+
+#ifdef __i386__
+// Некоторые определения, чтобы стандартизировать типы
+// Эти типы определены для платформы x86
+typedef unsigned int	u32int;
+typedef          int	s32int;
+typedef unsigned short	u16int;
+typedef          short	s16int;
+typedef unsigned char	u8int;
+typedef          char	s8int;
+#else
+#error "Types for other platforms not implemented."
+#endif
+
+extern void outb(u16int port, u8int value);
+
+extern u8int inb(u16int port);
+
+extern u16int inw(u16int port);
+
+#endif
+[/code]
+
+[code]
+// common.c -- Defines some global functions
+
+#include "common.h"
+
+// write a byte out to the specified port
+void outb(u16int port, u8int value)
+{
+	__asm__ volatile ("outb %1, %0" : : "dN" (port), "a" (value));
+}
+
+u8int inb(u16int port)
+{
+	u8int ret;
+	__asm__ volatile ("inb %1, %0" : "=a" (ret) : "dN" (port));
+	return ret;
+}
+
+u16int inw(u16int port)
+{
+	u16int ret;
+	__asm__ volatile ("inw %1, %0" : "=a" (ret) : "dN" (port));
+	return ret;
+}
+[/code]
+
+3.2.2. Код вывода сообщений на монитор.
+Заголовочный файл:
+[code]
+// monitor.h -- Defines the interface for monitor
+
+#ifndef MONITOR_H_
+#define MONITOR_H_
+
+#include "common.h"
+
+// Write a single character out to the screen
+extern void monitor_put(char c);
+
+// Clear the screen to all back
+extern void monitor_clear();
+
+// Output the null-terminated ASCII string to the monitor
+extern void monitor_write(char *c);
+
+#endif
+[/code]
+
+3.2.2.1. Перемещение курсора
+Для перемещения курсора, мы должны выполнить несколько простых действий: вычислить новое положение курсора; послать это значение контроллеру VGA. По некоторым причинам он принимает 16-битное значение как два последовательных байта. Мы пошлем на коммандный порт (0x3D4) команду 14, чтобы сообщить, что мы посылаем старшие 8-бит смещения, затем послать эти 8 бит на порт 0x3D5. Затем повторим эти действия для младших 8 бит, послав на командный порт значение 15.
+[code]
+// Обновляет позицию курсора
+static void move_cursor()
+{
+	// Ширина экрана 80 символов...
+	u16int cursorLocation = cursor_y*80 + cursor_x;
+	outb(0x3D4, 14);					// Мы собираемся послать старший байт координаты курсора...
+	outb(0x3D5, cursorLocation >> 8);	// ... и посылаем его.
+	outb(0x3D4, 15);					// Мы собираемся послать младший байт координаты курсора...
+	outb(0x3D5, cursorLocation);		// ... и посылаем его.
+}
+[/code]
+
+3.2.2.2. Прокрутка экрана.
+В какой-то момент мы заполним текстом весь экран. Было бы не плохо, если бы в этот момент экран повел себя как терминал и прокрутился бы вверх на одну линию.
+[code]
+// Функцию для прокрутки экрана
+static void scroll()
+{
+	// Создаем пробельный символ с установками цвета по умолчанию
+	u8int attributeByte = (0 /*black*/ << 4) | (15 /*white*/ & 0x0F);
+	u16int blank = 0x20 /*space*/ | (attributeByte << 8);
+
+	// 25 строка - последняя. Это значит, что мы должны прокрутить экран.
+	if(cursor_y >= 25)
+	{
+		// Копируем i строку в i-1
+		int i;
+		for (i = 0;i < 24*80; ++i)
+		{
+			video_memory[i] = video_memory[i+80];
+		}
+
+		// Последняя строка должна быть пустой
+		for(i = 24*80; i < 25*80;++i)
+		{
+			video_memory[i] = blank;
+		}
+		// Курсор должне быть на последней строке
+		cursor_y = 24;
+	}
+}
+[/code]
+
+3.2.2.3. Вывод символа на экран.
+[code]
+// Выводим символ на экран
+void monitor_put(char c)
+{
+	// Цвет символа - белый(15), цвет фона - черный(0)
+	u8int backColor = 0;
+	u8int foreColor = 15;
+
+	u8int attributeByte = (backColor << 4) | (foreColor & 0x0F);
+	
+	u16int attribute = attributeByte << 8;
+	u16int *location;
+
+	if(c == 0x08 && cursor_x) // <BackSpace>
+		--cursor_x;
+	else if(c == 0x09) // <TAB>
+		cursor_x = (cursor_x+8) & ~(8-1);
+	else if(c == '\r')
+		cursor_x = 0;
+	else if(c == '\n')
+	{
+		cursor_x = 0;
+		++cursor_y;
+	}
+	else if(c >= ' ')
+	{
+		location = video_memory + (cursor_y*80 + cursor_x)*2;
+		*location = c | attribute;
+		++cursor_x;
+	}
+
+	if(cursor_x >= 80)
+	{
+		cursor_x = 0;
+		++cursor_y;
+	}
+
+	scroll();
+	move_cursor();
+}
+[/code]
+
+3.2.2.4. Очистка экрана.
+[code]
+void monitor_clear()
+{
+	// Создаем пробельный символ с установками цвета по умолчанию
+	u8int attributeByte = (0 /*black*/ << 4) | (15 /*white*/ & 0x0F);
+	u16int blank = 0x20 /*space*/ | (attributeByte << 8);
+
+	int i;
+	for(i=0;i<80*25;++i)
+	{
+		video_memory[i] = blank;
+	}
+
+	cursor_x = 0;
+	cursor_y = 0;
+	move_cursor();
+}
+[/code]
+
+3.2.2.5. Вывод строки на экран
+[code]
+// Выводит нуль-терминированную строку на экран
+void monitor_write(char* c)
+{
+	int i = 0;
+	while(c[i])
+		monitor_put(c[i++]);
+}
+[/code]
+
+3.2.2.6. Указатель на framebuffer.
+Также в начало файла monitor.c необходимо добавить указатель на область памяти отведенную для VGA и переменные, содержащие текущее положение курсора:
+[code]
+#include "monitor.h"
+
+static u16int *video_memory = (u16int*)0xB8000;
+
+static u16int cursor_x = 0;
+static u16int cursor_y = 0;
+[/code]
+
+3.3. Заключение.
+Теперь можно добавить две следующие строки в нашу функцию kmain():
+[code]
+monitor_clear();
+monitor_write("Hello, world!");
+[/code]
+и проверить как оно все работает.
+
+Для того, чтобы проверить прокрутку я вывел на экран первые несколько абзацев лицензии GPL. Вот как это выглядело у меня:
+[image BootLic]
+
+Конечно, позже, когда у нас появятся системные вызовы, мы реализуем вывод сообщений на экран через них. Но уже сейчас мы можем воспользоваться выводом на экран для отладци и тестирования нашего ядра. И это хорошо.
+
+Далее нам для работы потребуются некоторые функции из стандартной библиотеки. Попробуйте реализовать их самостоятельно:
+[code]
+// Copy len bytes from src to dest.
+void memcpy(void *dest, const void *src, u32int len)
+{
+    // Implement yourself
+}
+
+// Write len copies of val into dest.
+void memset(void *dest, u8int val, u32int len)
+{
+    // Implement yourself
+}
+
+// Returns an integral value indicating the relationship between the strings:
+// A zero value indicates that both strings are equal.
+// A value greater than zero indicates that the first character that does not 
+// match has a greater value in str1 than in str2; And a value less than zero indicates the opposite.
+int strcmp(const char *str1, const char *str2)
+{
+	// Implement yourself
+}
+
+// Copy the NULL-terminated string src into dest, and
+// return dest.
+char *strcpy(char *dest, const char *src)
+{
+	// Implement yourself
+}
+
+// Concatenate the NULL-terminated string src onto
+// the end of dest, and return dest.
+char *strcat(char *dest, const char *src)
+{
+	// Implement yourself
+}
+[/code]
+
+
