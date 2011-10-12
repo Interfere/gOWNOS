@@ -3,7 +3,7 @@
 # The only one that needs is the assembler 
 # as we use nasm instead of GNU as
 
-SOURCES= boot.o main.o common.o monitor.o
+SOURCES= boot.o main.o common.o monitor.o descriptor_tables.o isr.o descriptors.o interrupts.o timer.o
 
 CFLAGS= -nostdlib -nostdinc -fno-builtin -fno-stack-protector
 LDFLAGS=-Tlink.ld
