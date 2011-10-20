@@ -14,6 +14,9 @@ all: $(SOURCES) link
 clean:
 	-rm *.o kernel
 
+iso-clean:
+	-rm kernel.iso update_image.sh
+
 link:
 	ld $(LDFLAGS) -o kernel $(SOURCES)
 
