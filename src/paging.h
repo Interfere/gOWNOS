@@ -4,6 +4,8 @@
 #include "common.h"
 #include "isr.h"
 
+#define PAGE_SIZE           (0x1000)
+
 typedef struct page
 {
 	u32int present	: 1;	// Страница представлена в памяти
@@ -60,6 +62,11 @@ extern page_t *get_page(u32int address, int make, page_directory_t *dir);
  * Обработчик Page fault
  */
 extern void page_fault(registers_t regs);
+
+/**
+  * Allocating frame
+  */
+void alloc_frame(page_t *page, int is_kernel, int is_writeable);
 
 #endif
 

@@ -12,9 +12,13 @@ typedef unsigned short	u16int;
 typedef          short	s16int;
 typedef unsigned char	u8int;
 typedef          char	s8int;
+typedef          u32int size_t;
 #else
 #error "Types for non-x86 not implemented."
 #endif
+
+#define PANIC(a) while(1)
+#define ASSERT(a) if(!(a)) PANIC(a)
 
 extern void outb(u16int port, u8int value);
 
